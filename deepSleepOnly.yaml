@@ -1,0 +1,181 @@
+# Source: https://github.com/KaiserSoft/ESPHomeDeepSleepExamples
+# Mirko Kaiser
+#
+#
+# This example configuration will allow you do disable deep_sleep when the device comes
+# online for its next run. Deep Sleep can be controlled for individual devices or for all 
+# devices running this config.
+#
+# This is necessary because the example posted here does not work with the current version of ESPhome
+# The code provided in the example only works if you send the MQTT messages while the device is not in deep_sleep
+# https://esphome.io/components/deep_sleep.html#deep-sleep-prevent-action
+#
+#
+# Config Options:
+#   * Change everything in "substitutions" for your device
+#   * Change "board" under "esphome" if you are using a different module. I use my own 
+#     custom PCB with an ESP12F module
+#   * Change "sleep_duration" to your liking. I use 10m for my battery+solar powered weather sensor
+#
+#
+# Usage: 
+#   publish a retaining MQTT message of 0 (zero) to the following MQTT topic.
+#     topic: ${devNameLower}/deepSleep
+#     value: 0
+# OR to disable all devices running this configuration
+#     topic: batteryDevicesControl/deepSleep
+#     value: 0
+#
+# When finished you can delete the topic or post a value of 1 (one) to enable deep_sleep again
+#
+#
+# Implementing into your own setup:
+#   The value binary_sensor "deepSleepEnabled" is set to "ON" if deep sleep should be activated.
+#   Check this GitHub repo for an example for a weather station with a BME20 sensor
+#
+# This is a workaround to upload the new config if a devices is currently using fixed deep_sleep
+# first compile the config using the webUI then run this on your docker host:
+#
+#   docker exec -i esphome /bin/bash -c 'F="deepSleepOnly.yaml"; while true; do esphome upload $F; if [ $? -eq 0 ]; then exit; fi; sleep 1; done'
+#
+#
+
+
+substitutions:
+  devName: "WeatherStationUSBC-0156"
+  devNameLower: "weatherstationusbc-0156"
+  devId: "ws-usbc-01"
+
+
+esphome:
+  name: $devNameLower
+  friendly_name: $devName
+  platform: ESP8266
+  board: esp12e
+  on_boot:
+    - priority: -100
+      then: # At this priority, pretty much everything should already be initialized.
+        - script.execute: activateDeepSleep
+
+  on_shutdown:
+    priority: -100
+    then:
+      # reset sensors for next run
+      - binary_sensor.template.publish:
+          id: deepSleepEnabled
+          state: OFF
+
+wifi:
+  ssid: !secret wifiSSID
+  password: !secret wifiPassword
+  domain: !secret wifiDomain
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: !secret apSSID
+    password: !secret apPassword
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: !secret timeZone
+    servers: !secret ntpServers
+
+captive_portal:
+
+# https://esphome.io/components/logger.html
+# NONE | ERROR | WARN | INFO | DEBUG | VERBOSE | VERY_VERBOSE
+logger:
+  level: DEBUG
+
+ota:
+  password: !secret otaPassword
+
+deep_sleep:
+  sleep_duration: 30s
+  id: deepSleepModule
+
+mqtt:
+  broker: !secret mqttBroker
+  birth_message: # for deepSleep devices so Home Assistant will not show 'unavailable'
+  will_message:  # for deepSleep devices so Home Assistant will not show 'unavailable'
+
+
+script:
+  - id: activateDeepSleep
+    mode: queued
+    then:
+      if:
+        condition:
+          - binary_sensor.is_on: deepSleepEnabled
+        then:
+          - deep_sleep.enter: deepSleepModule
+        else:
+          # WARNING - remove this else block for PROD script
+          # only here for testing since no other loop will call 'activateDeepSleep'
+          # this needs to happen in the sensor checking script. NOT HERE!
+          - delay: 2s
+          - script.execute: activateDeepSleep
+
+  # checks if MQTT deepSleep topics are set to ON or OFF
+  # "returns" ON or OFF via binary_sensor "deepSleepEnabled"
+  - id: isMqttDeepSleepEnabled
+    mode: queued
+    then:
+      #- logger.log:
+      #    format: "Deep Sleep Device: %.1f / Deep Sleep All %.1f"
+      #    args: [ 'id(mqttDeepSleepControl).state', 'id(mqttDeepSleepControlAll).state' ]
+      - if:
+          condition:
+            # Both MQTT topics do not exist == deep_sleep ON
+            # Individual device deep_slepp control ON/OFF
+            # Global deep_sleep control OFF
+            # Finally, default ON
+            - lambda: |-
+                if( isnan(id(mqttDeepSleepControl).raw_state) && isnan(id(mqttDeepSleepControlAll).raw_state) ){
+                  return true;
+                }else if( !isnan(id(mqttDeepSleepControl).raw_state) && id(mqttDeepSleepControl).state == 1 ){
+                  return true;
+                }else if( !isnan(id(mqttDeepSleepControl).raw_state) && id(mqttDeepSleepControl).state == 0 ){
+                  return false;
+                }
+                if( !isnan(id(mqttDeepSleepControlAll).raw_state) && id(mqttDeepSleepControlAll).state == 0 ){
+                  return false;
+                }
+                return true;
+          then:
+            - binary_sensor.template.publish:
+                id: deepSleepEnabled
+                state: ON # "return" ON
+          else:
+            - binary_sensor.template.publish:
+                id: deepSleepEnabled
+                state: OFF # "return" OFF
+            
+
+
+binary_sensor:
+  - platform: template
+    name: Deep Sleep Enabled
+    id: deepSleepEnabled
+    internal: True
+
+sensor:
+  - platform: mqtt_subscribe
+    # Topic to disable deepSleep for this device only
+    name: "MQTT Deep Sleep Control"
+    id: mqttDeepSleepControl
+    internal: True
+    topic: ${devNameLower}/deepSleep
+    on_value:
+      then:
+        - script.execute: isMqttDeepSleepEnabled
+  - platform: mqtt_subscribe
+    # Topic to disable deepSleep for all devices
+    name: "MQTT Deep Sleep Control All Devices"
+    id: mqttDeepSleepControlAll
+    internal: True
+    topic: batteryDevicesControl/deepSleep
+    on_value:
+      then:
+        - script.execute: isMqttDeepSleepEnabled
